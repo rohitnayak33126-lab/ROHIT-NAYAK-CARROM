@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ROHIT CARROM - Online Multiplayer</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#101827,#243b55);color:#fff;font-family:Arial,sans-serif;text-align:center}
+header{padding:16px 10px}h1{margin:0;color:#ffd166;letter-spacing:2px} .sub{color:#cbd5e1;margin-top:6px}
+.panel{width:min(95%,760px);margin:10px auto;background:#172337;border:1px solid #40516c;border-radius:16px;padding:14px;box-shadow:0 8px 24px #0005}
+.row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center;margin:8px 0}
+input,button{border:0;border-radius:9px;padding:11px 13px;font-size:15px}
+input{width:min(100%,270px);background:#fff;color:#111}
+button{background:#ffd166;color:#182235;font-weight:bold;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}
+#status{font-weight:bold;color:#9be7ff;min-height:24px}
+#myid{font-size:13px;color:#b9c8dc;overflow-wrap:anywhere}
+#board{width:min(94vw,600px);height:min(94vw,600px);max-width:600px;max-height:600px;background:#d99a55;border:12px solid #70421f;border-radius:12px;display:block;margin:14px auto;touch-action:manipulation}
+.controls{display:flex;justify-content:center;gap:16px;flex-wrap:wrap;align-items:center}
+label{font-size:14px;color:#dce7f5}input[type=range]{width:150px;padding:0}
+.score{font-size:18px;color:#ffe3a3;font-weight:bold}
+.note{font-size:12px;color:#aebbd0;line-height:1.5}
+</style>
+</head>
+<body>
+<header><h1>🎯 ROHIT CARROM</h1><div class="sub">2 Player • Real-time Online • Peer-to-Peer</div></header>
+
+<section class="panel">
+  <div class="row">
+    <button id="hostBtn">🎮 नया Room बनाओ</button>
+    <input id="roomInput" placeholder="दोस्त का Room ID (जैसे RH1234)">
+    <button id="joinBtn">Room Join करो</button>
+  </div>
+  <div id="myid">Room बनाने के बाद आपका छोटा ID यहाँ दिखेगा</div>
+  <div class="row"><button id="copyBtn" disabled>📋 Player ID Copy</button><button id="restartBtn" disabled>↻ नया गेम</button></div>
+  <div id="status">पहले नया Room बनाएं या दोस्त के Room ID से जुड़ें।</div>
+  <div class="score" id="score">आप: 0 | दोस्त: 0</div>
+</section>
+
+<canvas id="board" width="600" height="600"></canvas>
+
+<section class="panel">
+  <div class="controls">
+    <label>Striker की जगह <input id="pos" type="range" min="170" max="430" value="300"></label>
+    <label>शॉट की ताकत <input id="power" type="range" min="4" max="18" value="10"></label>
+    <label>निशाना <input id="aim" type="range" min="-65" max="65" value="0"></label>
+    <button id="shootBtn" disabled>🏏 SHOT मारो</button>
+  </div>
+  <p class="note">Player 1 नीचे से और Player 2 ऊपर से खेलता है। अपनी बारी आने पर striker की जगह, ताकत और निशाना चुनकर SHOT मारें। दोनों खिलाड़ियों को इंटरनेट चाहिए।</p>
+</section>
+
+<script>
+(() => {
+const canvas=document.getElementById('board'),ctx=canvas.getContext('2d');
+const $=id=>document.getElementById(id);
+const W=600, CENTER=300, R=13, STR=17, POCKETS=[[42,42],[558,42],[42,558],[558,558]];
+let peer=null,conn=null,isHost=false,connected=false,myPlayer=0,game=null,lastSend=0,anim=0,activeRoomId='';
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function initialGame(){
+  const coins=[];
+  const ring=()=>{
+    for(let i=0;i<6;i++){let a=i*Math.PI/3;coins.push({x:300+31*Math.cos(a),y:300+31*Math.sin(a),vx:0,vy:0,r:R,kind:'white',alive:true});}
+  };
+  coins.push({x:300,y:300,vx:0,vy:0,r:R,kind:'queen',alive:true});ring();
+  for(let i=0;i<12;i++){let a=i*Math.PI/6;coins.push({x:300+63*Math.cos(a),y:300+63*Math.sin(a),vx:0,vy:0,r:R,kind:i%2?'black':'white',alive:true});}
+  return {coins,turn:1,score:[0,0],moving:false,over:false,message:'Player 1 की बारी'};
+}
+function status(t){$('status').textContent=t;}
+function makeShortRoomId(){return 'RH'+Math.floor(1000+Math.random()*9000);}
+function setControls(){
+  const can=connected&&game&&!game.over&&!game.moving&&game.turn===myPlayer;
+  $('shootBtn').disabled=!can;$('pos').disabled=!can;$('power').disabled=!can;$('aim').disabled=!can;
+  $('restartBtn').disabled=!connected||!isHost;
+}
+function send(obj){if(conn&&conn.open)conn.send(obj);}
+function snapshot(){return JSON.parse(JSON.stringify(game));}
+function broadcast(){if(isHost)send({type:'state',game:snapshot()});}
+function updateScore(){
+  $('score').textContent=`ROHIT: ${game.score[myPlayer-1]} | DEV MAYANK RAJ: ${game.score[myPlayer===1?1:0]}`;
+}
+function draw(){
+ ctx.clearRect(0,0,W,W);
+ ctx.fillStyle='#d99a55';ctx.fillRect(0,0,W,W);
+ ctx.strokeStyle='#6b3e20';ctx.lineWidth=5;ctx.strokeRect(48,48,504,504);
+ ctx.strokeStyle='#9b572c';ctx.lineWidth=3;ctx.strokeRect(78,78,444,444);
+ ctx.beginPath();ctx.arc(300,300,85,0,Math.PI*2);ctx.stroke();
+ ctx.beginPath();ctx.arc(300,300,28,0,Math.PI*2);ctx.stroke();
+ ctx.strokeStyle='#8a4d28';ctx.lineWidth=2;
+ [[120,120,220,220],[480,120,380,220],[120,480,220,380],[480,480,380,380]].forEach(a=>{ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(a[2],a[3]);ctx.stroke();});
+ POCKETS.forEach(([x,y])=>{ctx.beginPath();ctx.arc(x,y,27,0,Math.PI*2);ctx.fillStyle='#21160f';ctx.fill();ctx.strokeStyle='#f6c47b';ctx.lineWidth=4;ctx.stroke();});
+ if(game){
+   game.coins.filter(c=>c.alive).forEach(c=>{
+     ctx.beginPath();ctx.arc(c.x,c.y,c.r,0,Math.PI*2);
+     ctx.fillStyle=c.kind==='queen'?'#d92332':c.kind==='black'?'#292929':'#fff0d5';ctx.fill();
+     ctx.strokeStyle='#70421f';ctx.lineWidth=2;ctx.stroke();
+     ctx.beginPath();ctx.arc(c.x,c.y,c.r*.55,0,Math.PI*2);ctx.strokeStyle=c.kind==='black'?'#777':'#c18a50';ctx.lineWidth=1;ctx.stroke();
+   });
+   if(!game.over){
+    let sy=game.turn===1?490:110,sx=Number($('pos').value);
+    if(connected&&myPlayer===game.turn&&!game.moving){
+      ctx.beginPath();ctx.arc(sx,sy,STR,0,Math.PI*2);ctx.fillStyle='#2878d0';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.stroke();
+      ctx.beginPath();ctx.moveTo(sx,sy);let angle=(game.turn===1?-Math.PI/2:Math.PI/2)+Number($('aim').value)*Math.PI/180;
+      ctx.lineTo(sx+Math.cos(angle)*70,sy+Math.sin(angle)*70);ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.stroke();
+    }
+   }
+ }
+}
+function render(){draw();if(game){updateScore();setControls();}}
+function physics(){
+ if(!isHost||!game||!game.moving)return;
+ const pieces=game.coins.filter(c=>c.alive);
+ for(let step=0;step<2;step++){
+  for(const p of pieces){
+   p.x+=p.vx/2;p.y+=p.vy/2;
+   p.vx*=.992;p.vy*=.992;
+   if(Math.hypot(p.vx,p.vy)<.045){p.vx=0;p.vy=0;}
+   // Pocket detection: coins entering the four corner wells are pocketed.
+   let pocketed=false;
+   for(const [px,py] of POCKETS){
+    const d=Math.hypot(p.x-px,p.y-py);
+    if(d<43){pocketed=true;game.score[game.turn-1]+=p.kind==='queen'?3:1;p.alive=false;break;}
+    if(d<72){const pull=0.13;p.vx+=(px-p.x)/Math.max(d,1)*pull;p.vy+=(py-p.y)/Math.max(d,1)*pull;}
+   }
+   if(pocketed)continue;
+   if(p.x<p.r+30){p.x=p.r+30;p.vx=Math.abs(p.vx)*.78;}
+   if(p.x>W-p.r-30){p.x=W-p.r-30;p.vx=-Math.abs(p.vx)*.78;}
+   if(p.y<p.r+30){p.y=p.r+30;p.vy=Math.abs(p.vy)*.78;}
+   if(p.y>W-p.r-30){p.y=W-p.r-30;p.vy=-Math.abs(p.vy)*.78;}
+  }
+  for(let i=0;i<pieces.length;i++)for(let j=i+1;j<pieces.length;j++){
+   let a=pieces[i],b=pieces[j];if(!a.alive||!b.alive)continue;
+   let dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),min=a.r+b.r;
+   if(d>0&&d<min){let nx=dx/d,ny=dy/d,over=(min-d)/2;a.x-=nx*over;a.y-=ny*over;b.x+=nx*over;b.y+=ny*over;
+    let rel=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;if(rel<0){let imp=-rel*.88;a.vx-=imp*nx;a.vy-=imp*ny;b.vx+=imp*nx;b.vy+=imp*ny;}
+   }
+  }
+ }
+ const moving=pieces.some(p=>Math.hypot(p.vx,p.vy)>.16);
+ if(!moving){
+  game.coins=game.coins.filter(c=>c.kind!=='striker');
+  game.moving=false;game.turn=game.turn===1?2:1;
+  game.message=`Player ${game.turn} की बारी`;
+ }
+ const now=Date.now();if(now-lastSend>45){lastSend=now;broadcast();}
+ render();
+}
+function loop(){physics();if(!isHost)draw();anim=requestAnimationFrame(loop);}
+function makeShot(player,x,power,aim){
+ if(!isHost||!game||game.moving||game.over||game.turn!==player)return;
+ const sy=player===1?490:110,angle=(player===1?-Math.PI/2:Math.PI/2)+aim*Math.PI/180;
+ const striker={x:clamp(x,170,430),y:sy,vx:Math.cos(angle)*power,vy:Math.sin(angle)*power,r:STR,kind:'striker',alive:true};
+ // Striker participates in physics but is not a scored coin.
+ game.coins.push(striker);game.moving=true;game.message=`Player ${player} खेल रहा है`;
+ broadcast();render();
+}
+function shoot(){
+ if(!connected||!game||game.turn!==myPlayer||game.moving)return;
+ const shot={x:Number($('pos').value),power:Number($('power').value),aim:Number($('aim').value)};
+ if(isHost)makeShot(myPlayer,shot.x,shot.power,shot.aim);else send({type:'shot',shot});
+}
+function startHost(){
+ if(peer){peer.destroy();peer=null;}conn=null;connected=false;isHost=true;myPlayer=1;game=initialGame();render();
+ activeRoomId=makeShortRoomId();
+ $('myid').textContent='आपका Room ID: '+activeRoomId+' (उदाहरण: RH1234)';
+ $('copyBtn').disabled=false;
+ status('Room ID दिख गया है। कनेक्शन तैयार हो रहा है...');
+ peer=new Peer(activeRoomId);
+ peer.on('open',id=>{
+  activeRoomId=id;
+  $('myid').textContent='आपका Room ID: '+id;
+  status('Room तैयार! दोस्त को यह ID दें।');
+ });
+ peer.on('connection',c=>{
+  if(conn&&conn.open){c.close();return;}
+  conn=c;wireConnection();
+ });
+ peer.on('error',e=>{
+  status(e.type==='unavailable-id'?'यह Room ID पहले से उपयोग में है। नया Room बनाएं।':'कनेक्शन Error: '+e.type+' — इंटरनेट जाँचें और फिर कोशिश करें।');
+ });
+}
+function joinRoom(){
+ const id=$('roomInput').value.trim().toUpperCase();if(!id){status('दोस्त का Player ID डालें।');return;}
+ if(peer){peer.destroy();peer=null;}conn=null;connected=false;isHost=false;myPlayer=2;game=null;render();
+ peer=new Peer();status('आपका Player ID बन रहा है...');
+ peer.on('open',myid=>{
+  $('myid').textContent='आपका Player ID: '+myid+' (आप Player 2 हैं)';
+  conn=peer.connect(id,{reliable:true});status('Room से जुड़ रहे हैं...');
+  wireConnection();
+ });
+ peer.on('error',e=>status('Join Error: '+e.type+' — Room ID जाँचें।'));
+}
+function wireConnection(){
+ if(!conn)return;
+ conn.on('open',()=>{
+  connected=true;
+  if(isHost){status('दोस्त जुड़ गया! Player 1 की बारी।');send({type:'state',game:snapshot()});}
+  else status('Room से जुड़ गए! Player 2 की बारी का इंतज़ार करें।');
+  render();
+ });
+ conn.on('data',msg=>{
+  if(!msg)return;
+  if(msg.type==='state'&&!isHost){game=msg.game;render();status(game.message||'Game चल रहा है');}
+  if(msg.type==='shot'&&isHost){makeShot(2,msg.shot.x,msg.shot.power,msg.shot.aim);}
+  if(msg.type==='restart'&&!isHost){game=msg.game;render();}
+ });
+ conn.on('close',()=>{connected=false;status('दूसरे खिलाड़ी का connection बंद हो गया।');render();});
+ conn.on('error',()=>status('Data connection में समस्या आई।'));
+}
+$('hostBtn').onclick=startHost;
+$('joinBtn').onclick=joinRoom;
+$('shootBtn').onclick=shoot;
+$('copyBtn').onclick=async()=>{try{await navigator.clipboard.writeText(activeRoomId||peer.id);status('Room ID copy हो गया!');}catch(e){status('Player ID को ऊपर से select करके copy करें।');}};
+$('restartBtn').onclick=()=>{if(!isHost)return;game=initialGame();broadcast();render();status('नया गेम शुरू! Player 1 की बारी।');};
+$('pos').oninput=draw;$('aim').oninput=draw;
+$('power').oninput=()=>{};
+window.addEventListener('beforeunload',()=>{if(peer)peer.destroy();});
+game=initialGame();render();loop();
+})();
+</script>
+</body>
+</html>
